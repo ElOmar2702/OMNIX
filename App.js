@@ -1,9 +1,12 @@
 import React, { useState } from 'react';
-import { StyleSheet, Text, View, ScrollView, Pressable, Image, TextInput, SafeAreaView, StatusBar, Platform } from 'react-native';
+import { StyleSheet, Text, View, ScrollView, Pressable, Image, TextInput, SafeAreaView, StatusBar, Platform, Alert } from 'react-native';
 import {
   INFO_MARCA,
+  MODALIDADES_ENVIO,
+  TARIFAS_ENVIO_MUNICIPIO,
   PRODUCTOS_INICIALES,
   PEDIDOS_INICIALES,
+  calcularEstimacionEnvio,
   obtenerStockTotalProducto,
   obtenerPrecioVisibleProducto
 } from './data/products';
@@ -15,7 +18,7 @@ const PREGUNTAS_INICIALES = [
     id: 'q-101',
     idProducto: 1,
     pregunta: '¿Qué diferencia hay entre la Edición Estándar y la Edición Pro?',
-    respuestaSimulada: '[Respuesta automática de demostración] La Edición Pro incluye calibración sináptica ampliada y mayor ancho de banda de sincronización.',
+    respuestaSimulada: 'La Edición Pro incluye calibración sináptica ampliada y mayor ancho de banda de sincronización.',
     estado: 'Respondido',
     fecha: '2026-11-20 09:30'
   },
@@ -29,7 +32,29 @@ const PREGUNTAS_INICIALES = [
   }
 ];
 
-const PASOS_FLUJO_PEDIDO = ['Confirmado', 'En preparación', 'Enviado', 'Entregado'];
+const MOTIVOS_AYUDA = ['Entrega', 'Producto', 'Otro'];
+
+const PASOS_FLUJO_PEDIDO = ['Confirmado', 'Preparando', 'En camino', 'Entregado'];
+
+const mostrarAlerta = (titulo, mensaje) => {
+  if (Platform.OS === 'web' && typeof window !== 'undefined' && typeof window.alert === 'function') {
+    window.alert(titulo ? `${titulo}\n\n${mensaje}` : mensaje);
+  } else {
+    Alert.alert(titulo || 'Aviso', mensaje);
+  }
+};
+
+const solicitarConfirmacion = (titulo, mensaje, alConfirmar) => {
+  if (Platform.OS === 'web' && typeof window !== 'undefined' && typeof window.confirm === 'function') {
+    const aceptado = window.confirm(`${titulo}\n\n${mensaje}`);
+    if (aceptado) alConfirmar();
+  } else {
+    Alert.alert(titulo, mensaje, [
+      { text: 'No', style: 'cancel' },
+      { text: 'Sí, confirmar', style: 'destructive', onPress: alConfirmar }
+    ]);
+  }
+};
 
 export default function App() {
   const [productos, setProductos] = useState(PRODUCTOS_INICIALES);
@@ -40,6 +65,16 @@ export default function App() {
   const [carrito, setCarrito] = useState([]);
   const [favoritos, setFavoritos] = useState([]);
   const [historial, setHistorial] = useState(PEDIDOS_INICIALES);
+
+  const [notificaciones, setNotificaciones] = useState([]);
+
+  const [suscripcionesReposicion, setSuscripcionesReposicion] = useState([]);
+
+  const [solicitudesAyuda, setSolicitudesAyuda] = useState([]);
+  const [codigoPedidoAyuda, setCodigoPedidoAyuda] = useState('');
+  const [motivoAyuda, setMotivoAyuda] = useState('Entrega');
+  const [descripcionAyuda, setDescripcionAyuda] = useState('');
+  const [errorAyuda, setErrorAyuda] = useState('');
 
   const [perfilComprador, setPerfilComprador] = useState(null);
   const [nombrePerfil, setNombrePerfil] = useState('');
@@ -82,12 +117,215 @@ export default function App() {
   const [telefonoComprador, setTelefonoComprador] = useState('');
   const [ciudadComprador, setCiudadComprador] = useState('');
   const [direccionComprador, setDireccionComprador] = useState('');
+  const [modalidadEnvioSeleccionada, setModalidadEnvioSeleccionada] = useState(null);
+  const [errorCheckoutEnvio, setErrorCheckoutEnvio] = useState('');
   const [ultimoCodigoPedido, setUltimoCodigoPedido] = useState('');
 
   const totalArticulosCarrito = carrito.reduce((acumulado, articulo) => acumulado + articulo.cantidad, 0);
+  const totalNotificacionesNoLeidas = notificaciones.filter(notificacion => !notificacion.leida).length;
+  const totalCasosAbiertos = solicitudesAyuda.filter(caso => caso.estado === 'Abierto').length;
 
   const navegarA = (pantalla) => {
     setPantallaActual(pantalla);
+  };
+
+  const registrarNotificacionUnica = (claveEvento, datosNotificacion) => {
+    setNotificaciones(anterior => {
+      if (anterior.some(elemento => elemento.claveEvento === claveEvento)) {
+        return anterior;
+      }
+      const nuevaNotificacion = {
+        id: 'notif-' + Date.now() + '-' + Math.floor(Math.random() * 10000),
+        claveEvento,
+        titulo: datosNotificacion.titulo,
+        mensaje: datosNotificacion.mensaje,
+        codigoPedido: datosNotificacion.codigoPedido || '',
+        estadoPedido: datosNotificacion.estadoPedido || '',
+        tipo: datosNotificacion.tipo || 'pedido',
+        fecha: new Date().toLocaleString(),
+        leida: false
+      };
+      return [nuevaNotificacion, ...anterior];
+    });
+  };
+
+  const marcarNotificacionComoLeida = (idNotificacion) => {
+    setNotificaciones(anterior =>
+      anterior.map(elemento =>
+        elemento.id === idNotificacion ? { ...elemento, leida: true } : elemento
+      )
+    );
+  };
+
+  const construirClaveSuscripcion = (idProducto, idVariante) => `${idProducto}__${idVariante || 'base'}`;
+
+  const gestionarSuscribirReposicion = (producto, variante) => {
+    const idVariante = variante ? variante.id : 'base';
+    const etiquetaVariante = variante ? variante.etiqueta : 'Presentación Única';
+    const clave = construirClaveSuscripcion(producto.id, idVariante);
+
+    const existente = suscripcionesReposicion.find(suscripcion => suscripcion.clave === clave);
+    if (existente && existente.activa) {
+      mostrarAlerta('Suscripción ya activa', `Ya solicitaste aviso de reposición para "${producto.nombre} (${etiquetaVariante})".`);
+      return;
+    }
+
+    if (existente && !existente.activa) {
+      setSuscripcionesReposicion(anterior =>
+        anterior.map(suscripcion =>
+          suscripcion.clave === clave
+            ? { ...suscripcion, activa: true, fecha: new Date().toLocaleString() }
+            : suscripcion
+        )
+      );
+      mostrarAlerta('Aviso reactivado', `Se reactivó tu aviso de reposición para "${producto.nombre} (${etiquetaVariante})".`);
+      return;
+    }
+
+    const nuevaSuscripcion = {
+      id: 'sub-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
+      clave,
+      idProducto: producto.id,
+      idVariante,
+      nombreProducto: producto.nombre,
+      etiquetaVariante,
+      activa: true,
+      fecha: new Date().toLocaleString()
+    };
+
+    setSuscripcionesReposicion(anterior => [nuevaSuscripcion, ...anterior]);
+    mostrarAlerta('Aviso registrado', `Te avisaremos cuando haya stock de "${producto.nombre} (${etiquetaVariante})".`);
+  };
+
+  const gestionarCancelarSuscripcionReposicion = (clave) => {
+    setSuscripcionesReposicion(anterior =>
+      anterior.map(suscripcion => (suscripcion.clave === clave ? { ...suscripcion, activa: false } : suscripcion))
+    );
+  };
+
+  const gestionarSimularReposicionVariante = (idProducto, idVariante, unidadesSimuladas = 5) => {
+    const cantidadReponer = Math.max(1, Number(unidadesSimuladas) || 5);
+    const productoObjetivo = productos.find(elemento => elemento.id === idProducto);
+    if (!productoObjetivo) return;
+
+    const varianteObjetivo = Array.isArray(productoObjetivo.variantes)
+      ? productoObjetivo.variantes.find(variante => variante.id === idVariante)
+      : null;
+
+    setProductos(productosAnteriores =>
+      productosAnteriores.map(producto => {
+        if (producto.id !== idProducto || !Array.isArray(producto.variantes)) return producto;
+        return {
+          ...producto,
+          variantes: producto.variantes.map(variante => {
+            if (variante.id !== idVariante) return variante;
+            return {
+              ...variante,
+              stock: (Number(variante.stock) || 0) + cantidadReponer
+            };
+          })
+        };
+      })
+    );
+
+    const clave = construirClaveSuscripcion(idProducto, idVariante);
+    const suscripcionActiva = suscripcionesReposicion.find(suscripcion => suscripcion.clave === clave && suscripcion.activa);
+
+    if (suscripcionActiva) {
+      const claveEventoReposicion = `reposicion-${clave}-${Date.now()}`;
+      const etiquetaVar = varianteObjetivo ? varianteObjetivo.etiqueta : suscripcionActiva.etiquetaVariante;
+      registrarNotificacionUnica(claveEventoReposicion, {
+        titulo: 'Reposición disponible (Simulación)',
+        mensaje: `El artículo "${productoObjetivo.nombre} (${etiquetaVar})" ya cuenta con stock disponible (+${cantidadReponer} unidades).`,
+        tipo: 'reposicion'
+      });
+      setSuscripcionesReposicion(anterior =>
+        anterior.map(suscripcion => (suscripcion.clave === clave ? { ...suscripcion, activa: false } : suscripcion))
+      );
+    }
+
+    mostrarAlerta(
+      'Reposición simulada',
+      `Se agregaron ${cantidadReponer} unidades de demostración a "${productoObjetivo.nombre}".${suscripcionActiva ? ' Se generó un aviso en Notificaciones.' : ''}`
+    );
+  };
+
+  const abrirCentroAyuda = (codigoPedidoPreseleccionado = '') => {
+    setErrorAyuda('');
+    if (codigoPedidoPreseleccionado) {
+      setCodigoPedidoAyuda(codigoPedidoPreseleccionado);
+    } else if (!codigoPedidoAyuda && historial.length > 0) {
+      setCodigoPedidoAyuda(historial[0].codigo);
+    }
+    navegarA('help');
+  };
+
+  const gestionarCrearSolicitudAyuda = () => {
+    if (historial.length === 0) {
+      const mensaje = 'Validación: No tienes pedidos en el historial para asociar una solicitud de ayuda.';
+      setErrorAyuda(mensaje);
+      mostrarAlerta('Validación', mensaje);
+      return;
+    }
+
+    const pedidoAsociado = historial.find(pedido => pedido.codigo === codigoPedidoAyuda);
+    if (!pedidoAsociado) {
+      const mensaje = 'Validación: Debes seleccionar un pedido existente del historial.';
+      setErrorAyuda(mensaje);
+      mostrarAlerta('Validación', mensaje);
+      return;
+    }
+
+    const descripcionLimpia = descripcionAyuda.trim();
+    if (descripcionLimpia.length < 15) {
+      const mensaje = `Validación: La descripción debe tener al menos 15 caracteres (actual: ${descripcionLimpia.length}).`;
+      setErrorAyuda(mensaje);
+      mostrarAlerta('Validación', mensaje);
+      return;
+    }
+
+    const motivoValido = MOTIVOS_AYUDA.includes(motivoAyuda) ? motivoAyuda : 'Otro';
+    const numeroCaso = 'CASO-' + Math.floor(100000 + Math.random() * 900000);
+    const fechaActual = new Date().toLocaleString();
+
+    const nuevaSolicitud = {
+      numeroCaso,
+      codigoPedido: pedidoAsociado.codigo,
+      motivo: motivoValido,
+      descripcion: descripcionLimpia,
+      estado: 'Abierto',
+      fechaCreacion: fechaActual,
+      respuestaSoporte: '',
+      fechaRespuesta: ''
+    };
+
+    setSolicitudesAyuda(anterior => [nuevaSolicitud, ...anterior]);
+    setDescripcionAyuda('');
+    setErrorAyuda('');
+    mostrarAlerta('Solicitud creada', `Caso ${numeroCaso} registrado con estado Abierto para el pedido ${pedidoAsociado.codigo}.`);
+  };
+
+  const gestionarSimularRespuestaCaso = (numeroCaso) => {
+    const fechaActual = new Date().toLocaleString();
+    setSolicitudesAyuda(anterior =>
+      anterior.map(caso => {
+        if (caso.numeroCaso !== numeroCaso || caso.estado !== 'Abierto') return caso;
+
+        let mensajePrueba = `Soporte OMNIX: Revisamos tu caso ${caso.numeroCaso} del pedido ${caso.codigoPedido}. Seguimos atentos a tu seguimiento.`;
+        if (caso.motivo === 'Entrega') {
+          mensajePrueba = `Soporte de Entrega OMNIX: Se verificó el estado logístico del pedido ${caso.codigoPedido} (${caso.numeroCaso}).`;
+        } else if (caso.motivo === 'Producto') {
+          mensajePrueba = `Soporte de Producto OMNIX: Se registró la novedad del artículo en el pedido ${caso.codigoPedido} (${caso.numeroCaso}).`;
+        }
+
+        return {
+          ...caso,
+          estado: 'Respondido',
+          respuestaSoporte: mensajePrueba,
+          fechaRespuesta: fechaActual
+        };
+      })
+    );
   };
 
   const obtenerInfoInsigniaStock = (cantidadStock) => {
@@ -102,7 +340,7 @@ export default function App() {
 
   const gestionarGuardarPerfil = () => {
     if (!nombrePerfil.trim() || !telefonoPerfil.trim() || !ciudadPerfil.trim() || !direccionPerfil.trim()) {
-      alert('Validación (HU29 - CA02): Completa nombre, teléfono, municipio y dirección para guardar tu perfil.');
+      mostrarAlerta('Validación', 'Completa nombre, teléfono, municipio y dirección para guardar tu perfil.');
       return;
     }
 
@@ -115,24 +353,25 @@ export default function App() {
     };
 
     setPerfilComprador(perfilGuardado);
-    alert('¡Perfil de comprador y preferencias guardados con éxito!');
+    mostrarAlerta('Perfil guardado', 'Tus datos de entrega y categoría favorita fueron guardados.');
   };
 
   const gestionarAutocompletarDesdePerfil = () => {
     if (!perfilComprador) {
-      alert('Aún no tienes un perfil guardado (CA04). Ve a "Perfil" para registrar tus datos de entrega y categoría favorita.');
+      mostrarAlerta('Sin perfil guardado', 'Aún no tienes un perfil guardado. Ve a "Perfil" para registrar tus datos.');
       return;
     }
     setNombreComprador(perfilComprador.nombre);
     setTelefonoComprador(perfilComprador.telefono);
     setCiudadComprador(perfilComprador.ciudad);
     setDireccionComprador(perfilComprador.direccion);
-    alert('Datos de entrega autocompletados desde tu perfil guardado.');
+    setErrorCheckoutEnvio('');
+    mostrarAlerta('Datos autocompletados', 'Se cargaron los datos desde tu perfil guardado.');
   };
 
   const gestionarAplicarCategoriaFavorita = () => {
     if (!perfilComprador || !perfilComprador.categoriaFavorita) {
-      alert('No tienes una categoría favorita guardada todavía.');
+      mostrarAlerta('Sin categoría favorita', 'No tienes una categoría favorita guardada todavía.');
       return;
     }
     setCategoriaSeleccionada(perfilComprador.categoriaFavorita);
@@ -140,7 +379,7 @@ export default function App() {
   };
 
   const abrirDetalleProducto = (producto) => {
-    const productoActual = productos.find(item => item.id === producto.id) || producto;
+    const productoActual = productos.find(elemento => elemento.id === producto.id) || producto;
     setProductoSeleccionado(productoActual);
     const variantes = Array.isArray(productoActual.variantes) ? productoActual.variantes : [];
     setIdVarianteSeleccionada(variantes.length === 1 ? variantes[0].id : null);
@@ -159,16 +398,19 @@ export default function App() {
     const pedidoObjetivo = historial.find(pedido => pedido.codigo === codigoPedido);
     if (!pedidoObjetivo) return;
 
-    if (pedidoObjetivo.estado === 'Entregado' || pedidoObjetivo.estado === 'Cancelado') {
-      alert(`No es posible avanzar el estado porque el pedido ya está "${pedidoObjetivo.estado}".`);
+    const estadoActual = pedidoObjetivo.estado || 'Confirmado';
+
+    if (estadoActual === 'Entregado' || estadoActual === 'Cancelado') {
+      mostrarAlerta('Transición bloqueada', `El pedido ${codigoPedido} está en estado "${estadoActual}" y no permite más avances.`);
       return;
     }
 
-    const indiceActual = PASOS_FLUJO_PEDIDO.indexOf(pedidoObjetivo.estado);
+    const indiceActual = PASOS_FLUJO_PEDIDO.indexOf(estadoActual);
     if (indiceActual === -1 || indiceActual >= PASOS_FLUJO_PEDIDO.length - 1) return;
 
     const siguienteEstado = PASOS_FLUJO_PEDIDO[indiceActual + 1];
     const fechaActual = new Date().toLocaleString();
+    const siguienteIndice = indiceActual + 1;
 
     setHistorial(anterior =>
       anterior.map(pedido =>
@@ -184,19 +426,36 @@ export default function App() {
           : pedido
       )
     );
+
+    const claveEvento = `pedido-${codigoPedido}-paso-${siguienteIndice}-${siguienteEstado}`;
+    registrarNotificacionUnica(claveEvento, {
+      titulo: `Actualización de pedido ${codigoPedido}`,
+      mensaje: `El pedido ${codigoPedido} cambió a estado "${siguienteEstado}".`,
+      codigoPedido,
+      estadoPedido: siguienteEstado,
+      tipo: 'pedido'
+    });
   };
 
-  const gestionarCancelarPedido = (codigoPedido) => {
+  const ejecutarCancelacionConfirmada = (codigoPedido) => {
     const pedidoObjetivo = historial.find(pedido => pedido.codigo === codigoPedido);
     if (!pedidoObjetivo) return;
 
-    if (pedidoObjetivo.estado !== 'Confirmado' && pedidoObjetivo.estado !== 'En preparación') {
-      alert(`No es posible cancelar este pedido en estado "${pedidoObjetivo.estado}" (CA03/CA04).`);
+    const estadoActual = pedidoObjetivo.estado || 'Confirmado';
+
+    if (estadoActual !== 'Confirmado' && estadoActual !== 'Preparando') {
+      mostrarAlerta(
+        'Cancelación no permitida',
+        `No es posible cancelar el pedido ${codigoPedido} porque su estado actual es "${estadoActual}".`
+      );
       return;
     }
 
-    if (pedidoObjetivo.stockRestaurado) {
-      alert('Este pedido ya fue cancelado y su stock ya fue reintegrado previamente.');
+    if (estadoActual === 'Cancelado' || pedidoObjetivo.stockRestaurado) {
+      mostrarAlerta(
+        'Pedido ya cancelado',
+        `El pedido ${codigoPedido} ya está Cancelado y su inventario ya fue reintegrado previamente.`
+      );
       return;
     }
 
@@ -210,7 +469,7 @@ export default function App() {
         const variantesActualizadas = producto.variantes.map(variante => {
           const articuloCoincidente = articulosPedidoProducto.find(articulo => articulo.idVariante === variante.id);
           if (!articuloCoincidente) return variante;
-          return { ...variante, stock: variante.stock + articuloCoincidente.cantidad };
+          return { ...variante, stock: (Number(variante.stock) || 0) + (Number(articuloCoincidente.cantidad) || 0) };
         });
 
         return { ...producto, variantes: variantesActualizadas };
@@ -233,7 +492,45 @@ export default function App() {
       )
     );
 
-    alert(`Pedido ${codigoPedido} cancelado con éxito. Las unidades fueron reintegradas al inventario.`);
+    const claveEvento = `pedido-${codigoPedido}-Cancelado`;
+    registrarNotificacionUnica(claveEvento, {
+      titulo: `Pedido ${codigoPedido} cancelado`,
+      mensaje: `El pedido ${codigoPedido} cambió a estado "Cancelado" y se reintegraron las unidades al stock.`,
+      codigoPedido,
+      estadoPedido: 'Cancelado',
+      tipo: 'pedido'
+    });
+
+    mostrarAlerta('Pedido cancelado', `El pedido ${codigoPedido} se marcó como Cancelado y se restituyó su stock.`);
+  };
+
+  const gestionarCancelarPedido = (codigoPedido) => {
+    const pedidoObjetivo = historial.find(pedido => pedido.codigo === codigoPedido);
+    if (!pedidoObjetivo) return;
+
+    const estadoActual = pedidoObjetivo.estado || 'Confirmado';
+
+    if (estadoActual === 'En camino' || estadoActual === 'Entregado') {
+      mostrarAlerta(
+        'No se puede cancelar',
+        `El pedido ${codigoPedido} está en estado "${estadoActual}" y ya no puede cancelarse.`
+      );
+      return;
+    }
+
+    if (estadoActual === 'Cancelado' || pedidoObjetivo.stockRestaurado) {
+      mostrarAlerta(
+        'Cancelación ya aplicada',
+        `El pedido ${codigoPedido} ya está Cancelado. No se realizarán nuevos reintegros de unidades.`
+      );
+      return;
+    }
+
+    solicitarConfirmacion(
+      'Confirmar cancelación de pedido',
+      `¿Deseas cancelar el pedido ${codigoPedido}? El pedido permanecerá en tu historial como Cancelado y se reintegrará el stock de cada variante.`,
+      () => ejecutarCancelacionConfirmada(codigoPedido)
+    );
   };
 
   const gestionarRecompra = (pedido) => {
@@ -244,14 +541,14 @@ export default function App() {
     let siguienteCarrito = [...carrito];
 
     pedido.articulos.forEach(articulo => {
-      const producto = productos.find(item => item.id === articulo.idProducto);
+      const producto = productos.find(elemento => elemento.id === articulo.idProducto);
       if (!producto) {
         avisos.push(`• ${articulo.nombre}: ya no existe en el catálogo.`);
         return;
       }
 
       const variantes = Array.isArray(producto.variantes) ? producto.variantes : [];
-      const variante = variantes.find(item => item.id === articulo.idVariante) || (variantes.length === 1 ? variantes[0] : null);
+      const variante = variantes.find(elemento => elemento.id === articulo.idVariante) || (variantes.length === 1 ? variantes[0] : null);
 
       if (!variante || variante.stock <= 0) {
         avisos.push(`• ${articulo.nombre} (${articulo.etiquetaVariante || 'Única'}): agotado (0 unidades disponibles).`);
@@ -259,7 +556,7 @@ export default function App() {
       }
 
       const claveCarrito = `${producto.id}__${variante.id}`;
-      const articuloExistente = siguienteCarrito.find(itemCarrito => itemCarrito.claveCarrito === claveCarrito);
+      const articuloExistente = siguienteCarrito.find(elementoCarrito => elementoCarrito.claveCarrito === claveCarrito);
       const yaEnCarrito = articuloExistente ? articuloExistente.cantidad : 0;
       const disponibleParaAgregar = Math.max(0, variante.stock - yaEnCarrito);
 
@@ -274,10 +571,10 @@ export default function App() {
       }
 
       if (articuloExistente) {
-        siguienteCarrito = siguienteCarrito.map(itemCarrito =>
-          itemCarrito.claveCarrito === claveCarrito
-            ? { ...itemCarrito, cantidad: itemCarrito.cantidad + cantidadParaAgregar, precio: variante.precioFinal }
-            : itemCarrito
+        siguienteCarrito = siguienteCarrito.map(elementoCarrito =>
+          elementoCarrito.claveCarrito === claveCarrito
+            ? { ...elementoCarrito, cantidad: elementoCarrito.cantidad + cantidadParaAgregar, precio: variante.precioFinal }
+            : elementoCarrito
         );
       } else {
         siguienteCarrito.push({
@@ -299,14 +596,14 @@ export default function App() {
     setCarrito(siguienteCarrito);
 
     if (cantidadAgregada === 0) {
-      alert(`No se pudieron agregar artículos al carrito:\n${avisos.join('\n')}`);
+      mostrarAlerta('Sin stock para recompra', avisos.join('\n'));
       return;
     }
 
     if (avisos.length > 0) {
-      alert(`Recompra parcial realizada:\n${avisos.join('\n')}`);
+      mostrarAlerta('Recompra parcial', avisos.join('\n'));
     } else {
-      alert('¡Todos los artículos del pedido anterior se agregaron al carrito!');
+      mostrarAlerta('Recompra agregada', '¡Todos los artículos del pedido anterior se agregaron al carrito!');
     }
 
     navegarA('cart');
@@ -314,9 +611,9 @@ export default function App() {
 
   const alternarFavorito = (producto) => {
     setFavoritos(anterior => {
-      const existe = anterior.find(item => item.id === producto.id);
+      const existe = anterior.find(elemento => elemento.id === producto.id);
       if (existe) {
-        return anterior.filter(item => item.id !== producto.id);
+        return anterior.filter(elemento => elemento.id !== producto.id);
       } else {
         return [...anterior, producto];
       }
@@ -329,7 +626,7 @@ export default function App() {
         return anterior.filter(id => id !== producto.id);
       }
       if (anterior.length >= 3) {
-        alert('Límite alcanzado (HU22 - CA03): Solo puedes comparar hasta 3 productos simultáneamente.');
+        mostrarAlerta('Límite alcanzado', 'Solo puedes comparar hasta 3 productos simultáneamente.');
         return anterior;
       }
       return [...anterior, producto.id];
@@ -345,21 +642,21 @@ export default function App() {
     if ((valorMin !== null && isNaN(valorMin)) || (valorMax !== null && isNaN(valorMax))) {
       const mensaje = 'Error: Ingresa valores numéricos válidos para el rango de precios.';
       setErrorFiltro(mensaje);
-      alert(mensaje);
+      mostrarAlerta('Error de filtro', mensaje);
       return;
     }
 
     if ((valorMin !== null && valorMin < 0) || (valorMax !== null && valorMax < 0)) {
       const mensaje = 'Error: Los precios del filtro no pueden ser negativos.';
       setErrorFiltro(mensaje);
-      alert(mensaje);
+      mostrarAlerta('Error de filtro', mensaje);
       return;
     }
 
     if (valorMin !== null && valorMax !== null && valorMin > valorMax) {
-      const mensaje = 'Rango inválido (CA02): El precio mínimo no puede ser mayor que el precio máximo.';
+      const mensaje = 'Rango inválido: El precio mínimo no puede ser mayor que el precio máximo.';
       setErrorFiltro(mensaje);
-      alert(mensaje);
+      mostrarAlerta('Rango inválido', mensaje);
       return;
     }
 
@@ -384,7 +681,7 @@ export default function App() {
   const gestionarAgregarPregunta = (idProducto) => {
     const textoLimpio = entradaPregunta.trim();
     if (textoLimpio.length < 10) {
-      alert('Validación (HU24): La pregunta debe tener al menos 10 caracteres.');
+      mostrarAlerta('Validación', 'La pregunta debe tener al menos 10 caracteres.');
       return;
     }
 
@@ -399,19 +696,19 @@ export default function App() {
 
     setPreguntas(anterior => [nuevaPregunta, ...anterior]);
     setEntradaPregunta('');
-    alert('Pregunta enviada con estado Pendiente.');
+    mostrarAlerta('Pregunta enviada', 'Pregunta enviada con estado Pendiente.');
   };
 
   const gestionarSimularRespuestaPregunta = (idPregunta, nombreProducto) => {
     setPreguntas(anterior =>
-      anterior.map(item =>
-        item.id === idPregunta
+      anterior.map(elemento =>
+        elemento.id === idPregunta
           ? {
-              ...item,
+              ...elemento,
               estado: 'Respondido',
-              respuestaSimulada: `[Respuesta simulada de demostración] Gracias por consultar sobre ${nombreProducto}. Este artículo cuenta con garantía académica OMNIX y compatibilidad verificada según las especificaciones técnicas publicadas.`
+              respuestaSimulada: `Gracias por consultar sobre ${nombreProducto}. Este artículo cuenta con garantía académica OMNIX y compatibilidad verificada según las especificaciones técnicas publicadas.`
             }
-          : item
+          : elemento
       )
     );
   };
@@ -419,7 +716,7 @@ export default function App() {
   const gestionarAgregarResena = (idProducto) => {
     const calificacionNum = parseInt(entradaResena, 10);
     if (isNaN(calificacionNum) || calificacionNum < 1 || calificacionNum > 5) {
-      alert('Error (CA02): La valoración debe ser un número entero entre 1 y 5.');
+      mostrarAlerta('Error', 'La valoración debe ser un número entero entre 1 y 5.');
       return;
     }
 
@@ -439,7 +736,7 @@ export default function App() {
     });
 
     setEntradaResena('');
-    alert('¡Valoración registrada con éxito (CA01)!');
+    mostrarAlerta('Valoración registrada', '¡Valoración registrada con éxito!');
   };
 
   const iniciarCreacionProducto = () => {
@@ -469,15 +766,15 @@ export default function App() {
     const stockNum = parseInt(stockFormulario, 10);
 
     if (isNaN(precioNum) || precioNum <= 0) {
-      alert('Error (CA03): El precio del producto debe ser un número positivo mayor a 0.');
+      mostrarAlerta('Error', 'El precio del producto debe ser un número positivo mayor a 0.');
       return;
     }
     if (isNaN(stockNum) || stockNum < 0) {
-      alert('Error (CA03): El stock del producto no puede ser un número negativo.');
+      mostrarAlerta('Error', 'El stock del producto no puede ser un número negativo.');
       return;
     }
     if (!nombreFormulario.trim() || !descripcionFormulario.trim() || !imagenFormulario.trim()) {
-      alert('Por favor complete todos los campos obligatorios.');
+      mostrarAlerta('Campos incompletos', 'Por favor complete todos los campos obligatorios.');
       return;
     }
 
@@ -496,7 +793,7 @@ export default function App() {
         resenas: []
       };
       setProductos(anterior => [nuevoProducto, ...anterior]);
-      alert('¡Producto creado y agregado al catálogo con éxito (CA01)!');
+      mostrarAlerta('Producto creado', '¡Producto creado y agregado al catálogo con éxito!');
     } else {
       setProductos(anterior => anterior.map(producto => {
         if (producto.id === idProductoEdicion) {
@@ -518,53 +815,53 @@ export default function App() {
         }
         return producto;
       }));
-      alert('¡Información del producto actualizada correctamente (CA02)!');
+      mostrarAlerta('Producto actualizado', '¡Información del producto actualizada correctamente!');
     }
 
     navegarA('catalog');
   };
 
   const agregarAlCarrito = (producto, cantidad = 1, idVariante = null, desdeDetalle = false) => {
-    const productoActualEnCatalogo = productos.find(item => item.id === producto.id);
+    const productoActualEnCatalogo = productos.find(elemento => elemento.id === producto.id);
     if (!productoActualEnCatalogo) return;
 
     const variantes = Array.isArray(productoActualEnCatalogo.variantes) ? productoActualEnCatalogo.variantes : [];
 
     if (!idVariante && variantes.length > 1 && !desdeDetalle) {
-      alert('Este producto tiene varias opciones. Elige una variante en el detalle antes de agregarlo al carrito.');
+      mostrarAlerta('Variantes disponibles', 'Este producto tiene varias opciones. Elige una variante en el detalle antes de agregarlo al carrito.');
       abrirDetalleProducto(productoActualEnCatalogo);
       return;
     }
 
     if (!idVariante && variantes.length > 1 && desdeDetalle) {
-      alert('Por favor selecciona una variante (talla, color o presentación) antes de agregar al carrito.');
+      mostrarAlerta('Selecciona variante', 'Por favor selecciona una variante antes de agregar al carrito.');
       return;
     }
 
-    const varianteElegida = variantes.find(item => item.id === idVariante) || (variantes.length === 1 ? variantes[0] : null);
+    const varianteElegida = variantes.find(elemento => elemento.id === idVariante) || (variantes.length === 1 ? variantes[0] : null);
     if (!varianteElegida) {
-      alert('Por favor selecciona una variante válida.');
+      mostrarAlerta('Variante inválida', 'Por favor selecciona una variante válida.');
       return;
     }
 
     if (varianteElegida.stock <= 0) {
-      alert(`La variante "${varianteElegida.etiqueta}" está agotada y no puede comprarse.`);
+      mostrarAlerta('Variante agotada', `La variante "${varianteElegida.etiqueta}" está agotada y no puede comprarse.`);
       return;
     }
 
     const claveCarrito = `${productoActualEnCatalogo.id}__${varianteElegida.id}`;
-    const existenteEnCarrito = carrito.find(item => item.claveCarrito === claveCarrito);
+    const existenteEnCarrito = carrito.find(elemento => elemento.claveCarrito === claveCarrito);
     const cantidadActualEnCarrito = existenteEnCarrito ? existenteEnCarrito.cantidad : 0;
 
     if (cantidadActualEnCarrito + cantidad > varianteElegida.stock) {
-      alert(`Stock insuficiente para "${varianteElegida.etiqueta}". Máximo permitido: ${varianteElegida.stock} unidades (ya tienes ${cantidadActualEnCarrito} en el carrito).`);
+      mostrarAlerta('Stock insuficiente', `Máximo permitido para "${varianteElegida.etiqueta}": ${varianteElegida.stock} unidades.`);
       return;
     }
 
     setCarrito(carritoAnterior => {
       if (existenteEnCarrito) {
-        return carritoAnterior.map(item =>
-          item.claveCarrito === claveCarrito ? { ...item, cantidad: item.cantidad + cantidad } : item
+        return carritoAnterior.map(elemento =>
+          elemento.claveCarrito === claveCarrito ? { ...elemento, cantidad: elemento.cantidad + cantidad } : elemento
         );
       } else {
         return [
@@ -587,41 +884,53 @@ export default function App() {
     if (desdeDetalle) {
       navegarA('cart');
     } else {
-      alert(`Agregado: ${productoActualEnCatalogo.nombre} (${varianteElegida.etiqueta})`);
+      mostrarAlerta('Agregado al carrito', `Agregado: ${productoActualEnCatalogo.nombre} (${varianteElegida.etiqueta})`);
     }
   };
 
   const aplicarCupon = () => {
     if (codigoCupon.trim().toUpperCase() === 'BIENVENIDO10') {
       setDescuentoActivo(true);
-      alert('¡Cupón BIENVENIDO10 aplicado con éxito (10% de descuento)!');
+      mostrarAlerta('Cupón aplicado', '¡Cupón BIENVENIDO10 aplicado con éxito (10% de descuento)!');
     } else {
-      alert('Código de cupón inválido o desconocido.');
+      mostrarAlerta('Cupón inválido', 'Código de cupón inválido o desconocido.');
       setDescuentoActivo(false);
     }
   };
 
   const confirmarCompra = () => {
-    if (!nombreComprador.trim() || !telefonoComprador.trim() || !ciudadComprador.trim() || !direccionComprador.trim()) {
-      alert('Por favor completa todos los datos obligatorios del comprador.');
+    if (!nombreComprador.trim() || !telefonoComprador.trim() || !direccionComprador.trim() || !ciudadComprador.trim() || !modalidadEnvioSeleccionada) {
+      const mensajeFaltantes = 'Datos faltantes: Debes completar nombre, teléfono, dirección, municipio y elegir la modalidad de envío (Estándar o Exprés).';
+      setErrorCheckoutEnvio(mensajeFaltantes);
+      mostrarAlerta('Datos incompletos', mensajeFaltantes);
+      return;
+    }
+
+    const estimacion = calcularEstimacionEnvio(ciudadComprador, modalidadEnvioSeleccionada);
+    if (!estimacion.valido || !estimacion.soportado) {
+      const mensajeNoCubierto = estimacion.motivo || 'El municipio ingresado requiere ajuste manual o no tiene envío disponible.';
+      setErrorCheckoutEnvio(mensajeNoCubierto);
+      mostrarAlerta('Envío no disponible', mensajeNoCubierto);
       return;
     }
 
     for (let articulo of carrito) {
-      const producto = productos.find(item => item.id === articulo.idProducto);
+      const producto = productos.find(elemento => elemento.id === articulo.idProducto);
       const variante = producto && Array.isArray(producto.variantes)
-        ? producto.variantes.find(item => item.id === articulo.idVariante)
+        ? producto.variantes.find(elemento => elemento.id === articulo.idVariante)
         : null;
       if (!variante || articulo.cantidad > variante.stock) {
-        alert(`La opción "${articulo.nombre} (${articulo.etiquetaVariante})" ya no cuenta con stock suficiente.`);
+        mostrarAlerta('Stock insuficiente', `La opción "${articulo.nombre} (${articulo.etiquetaVariante})" ya no cuenta con stock suficiente.`);
         return;
       }
     }
 
+    setErrorCheckoutEnvio('');
+
     const subtotal = carrito.reduce((acumulado, articulo) => acumulado + (articulo.precio * articulo.cantidad), 0);
     const descuento = descuentoActivo ? subtotal * 0.10 : 0;
     const subtotalConDescuento = subtotal - descuento;
-    const envio = subtotalConDescuento >= 150000 ? 0 : 8000;
+    const envio = estimacion.costo;
     const totalFinal = subtotalConDescuento + envio;
 
     const codigoPedido = 'OMNX-' + Math.floor(100000 + Math.random() * 900000);
@@ -629,11 +938,11 @@ export default function App() {
 
     setProductos(productosAnteriores => {
       return productosAnteriores.map(producto => {
-        const articulosParaProducto = carrito.filter(item => item.idProducto === producto.id);
+        const articulosParaProducto = carrito.filter(elemento => elemento.idProducto === producto.id);
         if (articulosParaProducto.length === 0 || !Array.isArray(producto.variantes)) return producto;
 
         const variantesActualizadas = producto.variantes.map(variante => {
-          const articuloCarritoCoincidente = articulosParaProducto.find(itemCarrito => itemCarrito.idVariante === variante.id);
+          const articuloCarritoCoincidente = articulosParaProducto.find(elementoCarrito => elementoCarrito.idVariante === variante.id);
           if (!articuloCarritoCoincidente) return variante;
           return { ...variante, stock: Math.max(0, variante.stock - articuloCarritoCoincidente.cantidad) };
         });
@@ -659,12 +968,19 @@ export default function App() {
       subtotal,
       descuento,
       costoEnvio: envio,
+      tiempoEstimadoEnvio: estimacion.plazo,
+      modalidadEnvio: estimacion.modalidad,
       total: totalFinal,
       comprador: {
-        nombre: nombreComprador,
-        telefono: telefonoComprador,
-        ciudad: ciudadComprador,
-        direccion: direccionComprador
+        nombre: nombreComprador.trim(),
+        telefono: telefonoComprador.trim(),
+        ciudad: estimacion.municipioNormalizado,
+        direccion: direccionComprador.trim()
+      },
+      direccion: {
+        alias: direccionComprador.trim(),
+        municipio: estimacion.municipioNormalizado,
+        descripcion: direccionComprador.trim()
       },
       historialEstados: [{ estado: 'Confirmado', fecha: fechaActual }]
     };
@@ -709,8 +1025,8 @@ export default function App() {
   const obtenerColorEstadoPedido = (estado) => {
     if (estado === 'Cancelado') return '#ff5c5c';
     if (estado === 'Entregado') return '#4ade80';
-    if (estado === 'Enviado') return '#38bdf8';
-    if (estado === 'En preparación') return '#facc15';
+    if (estado === 'En camino') return '#38bdf8';
+    if (estado === 'Preparando') return '#facc15';
     return '#9366F1';
   };
 
@@ -734,9 +1050,25 @@ export default function App() {
             source={require('./assets/Imagenes/OMNIX_logo.jpg')}
             style={styles.logoImg}
           />
-          <Text style={styles.headerOwnerText}>OMNIX - Tecnologia a tu alcancé</Text>
+          <Text style={styles.headerOwnerText} numberOfLines={1}>OMNIX</Text>
         </Pressable>
         <View style={styles.headerIcons}>
+          <Pressable style={styles.cartIconBtn} onPress={() => navegarA('notifications')}>
+            <Text style={styles.cartIconText}>🔔</Text>
+            {totalNotificacionesNoLeidas > 0 && (
+              <View style={[styles.cartBadge, { backgroundColor: '#38bdf8' }]}>
+                <Text style={[styles.cartBadgeText, { color: '#0b0a12' }]}>{totalNotificacionesNoLeidas}</Text>
+              </View>
+            )}
+          </Pressable>
+          <Pressable style={styles.cartIconBtn} onPress={() => abrirCentroAyuda()}>
+            <Text style={styles.cartIconText}>🎧</Text>
+            {totalCasosAbiertos > 0 && (
+              <View style={[styles.cartBadge, { backgroundColor: '#facc15' }]}>
+                <Text style={[styles.cartBadgeText, { color: '#0b0a12' }]}>{totalCasosAbiertos}</Text>
+              </View>
+            )}
+          </Pressable>
           <Pressable style={styles.cartIconBtn} onPress={() => navegarA('profile')}>
             <Text style={styles.cartIconText}>👤</Text>
             {perfilComprador && (
@@ -836,7 +1168,7 @@ export default function App() {
               {productosFiltrados.slice(0, 4).map(producto => {
                 const listaResenas = Array.isArray(producto.resenas) ? producto.resenas : [];
                 const promedio = listaResenas.length > 0
-                  ? (listaResenas.reduce((a, b) => a + b, 0) / listaResenas.length).toFixed(1)
+                  ? (listaResenas.reduce((acumulador, valor) => acumulador + valor, 0) / listaResenas.length).toFixed(1)
                   : '0.0';
                 const tieneMultiplesVariantes = Array.isArray(producto.variantes) && producto.variantes.length > 1;
                 const estaComparado = idsComparacion.includes(producto.id);
@@ -846,7 +1178,7 @@ export default function App() {
                   <Pressable key={producto.id} style={styles.productCard} onPress={() => abrirDetalleProducto(producto)}>
                     <Image source={{ uri: producto.imagen }} style={styles.productImg} />
                     <Pressable style={styles.favBtnCard} onPress={(evento) => { evento.stopPropagation(); alternarFavorito(producto); }}>
-                      <Text>{favoritos.some(item => item.id === producto.id) ? '❤️' : '🤍'}</Text>
+                      <Text>{favoritos.some(elemento => elemento.id === producto.id) ? '❤️' : '🤍'}</Text>
                     </Pressable>
                     <View style={styles.productInfo}>
                       <Text style={styles.brandTagText}>{producto.marca || 'OMNIX Labs'}</Text>
@@ -1023,7 +1355,7 @@ export default function App() {
                 {productosFiltrados.map(producto => {
                   const listaResenas = Array.isArray(producto.resenas) ? producto.resenas : [];
                   const promedio = listaResenas.length > 0
-                    ? (listaResenas.reduce((a, b) => a + b, 0) / listaResenas.length).toFixed(1)
+                    ? (listaResenas.reduce((acumulador, valor) => acumulador + valor, 0) / listaResenas.length).toFixed(1)
                     : '0.0';
                   const stockTotal = obtenerStockTotalProducto(producto);
                   const insigniaStock = obtenerInfoInsigniaStock(stockTotal);
@@ -1033,7 +1365,7 @@ export default function App() {
                     <Pressable key={producto.id} style={styles.productCard} onPress={() => abrirDetalleProducto(producto)}>
                       <Image source={{ uri: producto.imagen }} style={styles.productImg} />
                       <Pressable style={styles.favBtnCard} onPress={(evento) => { evento.stopPropagation(); alternarFavorito(producto); }}>
-                        <Text>{favoritos.some(item => item.id === producto.id) ? '❤️' : '🤍'}</Text>
+                        <Text>{favoritos.some(elemento => elemento.id === producto.id) ? '❤️' : '🤍'}</Text>
                       </Pressable>
                       <View style={styles.productInfo}>
                         <Text style={styles.brandTagText}>{producto.marca || 'OMNIX Labs'}</Text>
@@ -1162,9 +1494,9 @@ export default function App() {
         )}
 
         {pantallaActual === 'detail' && productoSeleccionado && (() => {
-          const seleccionadoActual = productos.find(item => item.id === productoSeleccionado.id) || productoSeleccionado;
+          const seleccionadoActual = productos.find(elemento => elemento.id === productoSeleccionado.id) || productoSeleccionado;
           const variantes = Array.isArray(seleccionadoActual.variantes) ? seleccionadoActual.variantes : [];
-          const varianteActiva = variantes.find(item => item.id === idVarianteSeleccionada) || null;
+          const varianteActiva = variantes.find(elemento => elemento.id === idVarianteSeleccionada) || null;
           const stockTotal = obtenerStockTotalProducto(seleccionadoActual);
           const precioMostrado = varianteActiva ? varianteActiva.precioFinal : obtenerPrecioVisibleProducto(seleccionadoActual);
           const stockMostrado = varianteActiva ? varianteActiva.stock : stockTotal;
@@ -1173,14 +1505,25 @@ export default function App() {
 
           const listaResenas = Array.isArray(seleccionadoActual.resenas) ? seleccionadoActual.resenas : [];
           const promedio = listaResenas.length > 0
-            ? (listaResenas.reduce((a, b) => a + b, 0) / listaResenas.length).toFixed(1)
+            ? (listaResenas.reduce((acumulador, valor) => acumulador + valor, 0) / listaResenas.length).toFixed(1)
             : 'Sin valoraciones';
 
-          const preguntasProducto = preguntas.filter(item => item.idProducto === seleccionadoActual.id);
+          const preguntasProducto = preguntas.filter(elemento => elemento.idProducto === seleccionadoActual.id);
 
           const productosRelacionados = productos
-            .filter(item => item.categoria === seleccionadoActual.categoria && item.id !== seleccionadoActual.id && obtenerStockTotalProducto(item) > 0)
+            .filter(elemento => {
+              if (elemento.categoria !== seleccionadoActual.categoria || elemento.id === seleccionadoActual.id) return false;
+              const variantesElemento = Array.isArray(elemento.variantes) ? elemento.variantes : [];
+              return variantesElemento.some(variante => (Number(variante.stock) || 0) > 0);
+            })
             .slice(0, 4);
+
+          const varianteParaReposicion = varianteActiva && varianteActiva.stock <= 0
+            ? varianteActiva
+            : variantes.find(variante => (Number(variante.stock) || 0) <= 0) || { id: 'base', etiqueta: 'Presentación Única', stock: 0 };
+
+          const claveReposicionActual = construirClaveSuscripcion(seleccionadoActual.id, varianteParaReposicion.id);
+          const suscripcionActual = suscripcionesReposicion.find(suscripcion => suscripcion.clave === claveReposicionActual) || null;
 
           return (
             <ScrollView contentContainerStyle={styles.scrollContent}>
@@ -1193,7 +1536,7 @@ export default function App() {
               <View style={styles.detailTitleRow}>
                 <Text style={styles.detailTitle}>{seleccionadoActual.nombre}</Text>
                 <Pressable onPress={() => alternarFavorito(seleccionadoActual)}>
-                  <Text style={{ fontSize: 24 }}>{favoritos.some(item => item.id === seleccionadoActual.id) ? '❤️' : '🤍'}</Text>
+                  <Text style={{ fontSize: 24 }}>{favoritos.some(elemento => elemento.id === seleccionadoActual.id) ? '❤️' : '🤍'}</Text>
                 </Pressable>
               </View>
 
@@ -1209,6 +1552,43 @@ export default function App() {
               {insigniaStockMostrado.tipo === 'out' && (
                 <View style={styles.outOfStockBox}>
                   <Text style={styles.outOfStockText}>AGOTADO — SIN UNIDADES DISPONIBLES</Text>
+                </View>
+              )}
+
+              {(stockTotal === 0 || (varianteActiva && varianteActiva.stock <= 0)) && (
+                <View style={styles.restockBox}>
+                  <Text style={styles.specsTitle}>🔔 Avisos de Reposición </Text>
+                  <Text style={{ color: '#e2e8f0', fontSize: 12, marginBottom: 8 }}>
+                    Artículo: {seleccionadoActual.nombre} ({varianteParaReposicion.etiqueta})
+                  </Text>
+
+                  {suscripcionActual && suscripcionActual.activa ? (
+                    <View style={{ gap: 8 }}>
+                      <Text style={{ color: '#4ade80', fontSize: 12, fontWeight: 'bold' }}>
+                        ✓ Suscripción activa para este artículo agotado.
+                      </Text>
+                      <Pressable
+                        style={styles.cancelSubBtn}
+                        onPress={() => gestionarCancelarSuscripcionReposicion(claveReposicionActual)}
+                      >
+                        <Text style={styles.cancelSubBtnText}>Cancelar suscripción de aviso</Text>
+                      </Pressable>
+                    </View>
+                  ) : (
+                    <Pressable
+                      style={styles.couponBtn}
+                      onPress={() => gestionarSuscribirReposicion(seleccionadoActual, varianteParaReposicion)}
+                    >
+                      <Text style={styles.couponBtnText}>Avisarme cuando haya stock</Text>
+                    </Pressable>
+                  )}
+
+                  <Pressable
+                    style={[styles.simActionBtn, { marginTop: 10 }]}
+                    onPress={() => gestionarSimularReposicionVariante(seleccionadoActual.id, varianteParaReposicion.id, 5)}
+                  >
+                    <Text style={styles.simActionBtnText}>🧪 Simular reposición de stock (+5 uds - Demostración)</Text>
+                  </Pressable>
                 </View>
               )}
 
@@ -1306,7 +1686,7 @@ export default function App() {
                         onPress={() => {
                           const maximoPermitido = varianteActiva ? varianteActiva.stock : stockTotal;
                           if (cantidadDetalle + 1 > maximoPermitido) {
-                            alert(`Stock máximo permitido para esta opción: ${maximoPermitido} unidades.`);
+                            mostrarAlerta('Stock máximo', `Stock máximo permitido para esta opción: ${maximoPermitido} unidades.`);
                             return;
                           }
                           setCantidadDetalle(cantidadDetalle + 1);
@@ -1345,25 +1725,25 @@ export default function App() {
                   </Text>
                 ) : (
                   <View style={{ marginTop: 12, gap: 10 }}>
-                    {preguntasProducto.map(itemPregunta => (
-                      <View key={itemPregunta.id} style={styles.questionCard}>
+                    {preguntasProducto.map(elementoPregunta => (
+                      <View key={elementoPregunta.id} style={styles.questionCard}>
                         <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
-                          <Text style={{ color: '#A3A0B8', fontSize: 11 }}>{itemPregunta.fecha}</Text>
-                          <Text style={{ color: itemPregunta.estado === 'Respondido' ? '#4ade80' : '#facc15', fontSize: 11, fontWeight: 'bold' }}>
-                            {itemPregunta.estado}
+                          <Text style={{ color: '#A3A0B8', fontSize: 11 }}>{elementoPregunta.fecha}</Text>
+                          <Text style={{ color: elementoPregunta.estado === 'Respondido' ? '#4ade80' : '#facc15', fontSize: 11, fontWeight: 'bold' }}>
+                            {elementoPregunta.estado}
                           </Text>
                         </View>
                         <Text style={{ color: '#ffffff', fontSize: 13, fontWeight: '600', marginBottom: 6 }}>
-                          P: {itemPregunta.pregunta}
+                          P: {elementoPregunta.pregunta}
                         </Text>
-                        {itemPregunta.estado === 'Respondido' ? (
+                        {elementoPregunta.estado === 'Respondido' ? (
                           <Text style={{ color: '#c4b5fd', fontSize: 12, lineHeight: 18 }}>
-                            {itemPregunta.respuestaSimulada}
+                            {elementoPregunta.respuestaSimulada}
                           </Text>
                         ) : (
                           <Pressable
                             style={styles.simActionBtn}
-                            onPress={() => gestionarSimularRespuestaPregunta(itemPregunta.id, seleccionadoActual.nombre)}
+                            onPress={() => gestionarSimularRespuestaPregunta(elementoPregunta.id, seleccionadoActual.nombre)}
                           >
                             <Text style={styles.simActionBtnText}>Simular respuesta (Demostración)</Text>
                           </Pressable>
@@ -1378,14 +1758,18 @@ export default function App() {
                 <Text style={styles.specsTitle}>✨ Productos relacionados ({seleccionadoActual.categoria})</Text>
                 {productosRelacionados.length === 0 ? (
                   <Text style={[styles.emptyText, { textAlign: 'left' }]}>
-                    No hay otros artículos disponibles en esta categoría en este momento.
+                    No hay otros productos disponibles en esta categoría.
                   </Text>
                 ) : (
                   <View style={styles.productsGrid}>
                     {productosRelacionados.map(relacionado => {
-                      const cantidadVariantesDisponibles = Array.isArray(relacionado.variantes)
-                        ? relacionado.variantes.filter(variante => variante.stock > 0).length
-                        : 0;
+                      const variantesDisponibles = Array.isArray(relacionado.variantes)
+                        ? relacionado.variantes.filter(variante => (Number(variante.stock) || 0) > 0)
+                        : [];
+                      const stockDisponibleRelacionado = variantesDisponibles.reduce((acumulador, variante) => acumulador + (Number(variante.stock) || 0), 0);
+                      const precioMinimoDisponible = variantesDisponibles.length > 0
+                        ? Math.min(...variantesDisponibles.map(variante => Number(variante.precioFinal) || 0))
+                        : obtenerPrecioVisibleProducto(relacionado);
                       return (
                         <Pressable
                           key={relacionado.id}
@@ -1396,11 +1780,11 @@ export default function App() {
                           <View style={styles.productInfo}>
                             <Text style={styles.productName} numberOfLines={2}>{relacionado.nombre}</Text>
                             <Text style={styles.stockInfoText}>
-                              {cantidadVariantesDisponibles > 1
-                                ? `${cantidadVariantesDisponibles} opciones disp.`
-                                : `${obtenerStockTotalProducto(relacionado)} disp.`}
+                              {variantesDisponibles.length > 1
+                                ? `${variantesDisponibles.length} variantes disp.`
+                                : `${stockDisponibleRelacionado} disp.`}
                             </Text>
-                            <Text style={styles.productPrice}>${obtenerPrecioVisibleProducto(relacionado).toLocaleString()}</Text>
+                            <Text style={styles.productPrice}>${precioMinimoDisponible.toLocaleString()}</Text>
                           </View>
                         </Pressable>
                       );
@@ -1433,6 +1817,61 @@ export default function App() {
             </ScrollView>
           );
         })()}
+
+        {pantallaActual === 'notifications' && (
+          <ScrollView contentContainerStyle={styles.scrollContent}>
+            <Pressable style={styles.backBtn} onPress={() => navegarA('home')}>
+              <Text style={styles.backBtnText}>← Regresar al Inicio</Text>
+            </Pressable>
+
+            <Text style={styles.sectionTitle}>
+              🔔 Centro de Notificaciones ({totalNotificacionesNoLeidas} sin leer)
+            </Text>
+            <Text style={{ color: '#A3A0B8', fontSize: 12, marginBottom: 14 }}>
+              Avisos internos de cambios en tus pedidos y reposiciones simuladas. Pulsa un aviso para marcarlo como leído.
+            </Text>
+
+            {notificaciones.length === 0 ? (
+              <View style={styles.emptyContainer}>
+                <Text style={styles.emptyText}>
+                  No tienes notificaciones en este momento. Los cambios de estado de tus pedidos o reposiciones simuladas aparecerán aquí.
+                </Text>
+              </View>
+            ) : (
+              notificaciones.map(notificacion => (
+                <Pressable
+                  key={notificacion.id}
+                  style={[
+                    styles.notificationCard,
+                    !notificacion.leida ? styles.notificationUnread : styles.notificationRead
+                  ]}
+                  onPress={() => marcarNotificacionComoLeida(notificacion.id)}
+                >
+                  <View style={styles.historyHeaderRow}>
+                    <Text style={styles.historyCode}>{notificacion.titulo}</Text>
+                    <View style={[styles.statusBadge, { borderColor: notificacion.leida ? '#64748b' : '#38bdf8' }]}>
+                      <Text style={[styles.statusBadgeText, { color: notificacion.leida ? '#94a3b8' : '#38bdf8' }]}>
+                        {notificacion.leida ? 'Leída' : 'No leída'}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <Text style={{ color: '#ffffff', fontSize: 13, marginBottom: 4 }}>
+                    {notificacion.mensaje}
+                  </Text>
+
+                  {notificacion.codigoPedido ? (
+                    <Text style={{ color: '#c4b5fd', fontSize: 11, marginBottom: 4 }}>
+                      Pedido: {notificacion.codigoPedido}{notificacion.estadoPedido ? ` • Nuevo estado: ${notificacion.estadoPedido}` : ''}
+                    </Text>
+                  ) : null}
+
+                  <Text style={styles.historyDate}>{notificacion.fecha}</Text>
+                </Pressable>
+              ))
+            )}
+          </ScrollView>
+        )}
 
         {pantallaActual === 'profile' && (
           <ScrollView contentContainerStyle={styles.scrollContent}>
@@ -1645,7 +2084,7 @@ export default function App() {
                   <Pressable key={producto.id} style={styles.productCard} onPress={() => abrirDetalleProducto(producto)}>
                     <Image source={{ uri: producto.imagen }} style={styles.productImg} />
                     <Pressable style={styles.favBtnCard} onPress={(evento) => { evento.stopPropagation(); alternarFavorito(producto); }}>
-                      <Text>{favoritos.some(item => item.id === producto.id) ? '❤️' : '🤍'}</Text>
+                      <Text>{favoritos.some(elemento => elemento.id === producto.id) ? '❤️' : '🤍'}</Text>
                     </Pressable>
                     <View style={styles.productInfo}>
                       <Text style={styles.productName} numberOfLines={2}>{producto.nombre}</Text>
@@ -1680,14 +2119,9 @@ export default function App() {
             ) : (
               <View>
                 <View style={styles.statusSummaryBanner}>
-                  <Text style={styles.specsTitle}>📊 Resumen de Estado del Carrito</Text>
+                  <Text style={styles.specsTitle}>Resumen de Estado del Carrito</Text>
                   <Text style={{ color: '#ffffff', fontSize: 12 }}>
                     Referencias distintas: {carrito.length} • Total de unidades: {totalArticulosCarrito}
-                  </Text>
-                  <Text style={{ color: '#A3A0B8', fontSize: 11, marginTop: 2 }}>
-                    {carrito.reduce((acumulado, articulo) => acumulado + articulo.precio * articulo.cantidad, 0) >= 150000
-                      ? '✓ Envío gratis desbloqueado (pedido >= $150.000)'
-                      : 'Envío estándar $8.000 (Gratis desde $150.000)'}
                   </Text>
                 </View>
 
@@ -1702,10 +2136,10 @@ export default function App() {
                         <Pressable
                           style={styles.cartQtyBtn}
                           onPress={() => {
-                            setCarrito(carrito.map(item =>
-                              item.claveCarrito === articulo.claveCarrito
-                                ? { ...item, cantidad: Math.max(1, item.cantidad - 1) }
-                                : item
+                            setCarrito(carrito.map(elemento =>
+                              elemento.claveCarrito === articulo.claveCarrito
+                                ? { ...elemento, cantidad: Math.max(1, elemento.cantidad - 1) }
+                                : elemento
                             ));
                           }}
                         >
@@ -1715,19 +2149,19 @@ export default function App() {
                         <Pressable
                           style={styles.cartQtyBtn}
                           onPress={() => {
-                            const producto = productos.find(item => item.id === articulo.idProducto);
+                            const producto = productos.find(elemento => elemento.id === articulo.idProducto);
                             const variante = producto && Array.isArray(producto.variantes)
-                              ? producto.variantes.find(item => item.id === articulo.idVariante)
+                              ? producto.variantes.find(elemento => elemento.id === articulo.idVariante)
                               : null;
                             const stockMaximo = variante ? variante.stock : articulo.cantidad;
                             if (articulo.cantidad + 1 > stockMaximo) {
-                              alert(`Stock máximo alcanzado para "${articulo.etiquetaVariante}" (${stockMaximo} unidades).`);
+                              mostrarAlerta('Stock máximo', `Stock máximo alcanzado para "${articulo.etiquetaVariante}" (${stockMaximo} unidades).`);
                               return;
                             }
-                            setCarrito(carrito.map(item =>
-                              item.claveCarrito === articulo.claveCarrito
-                                ? { ...item, cantidad: item.cantidad + 1 }
-                                : item
+                            setCarrito(carrito.map(elemento =>
+                              elemento.claveCarrito === articulo.claveCarrito
+                                ? { ...elemento, cantidad: elemento.cantidad + 1 }
+                                : elemento
                             ));
                           }}
                         >
@@ -1736,7 +2170,7 @@ export default function App() {
                       </View>
                     </View>
                     <Pressable
-                      onPress={() => setCarrito(carrito.filter(item => item.claveCarrito !== articulo.claveCarrito))}
+                      onPress={() => setCarrito(carrito.filter(elemento => elemento.claveCarrito !== articulo.claveCarrito))}
                       style={styles.deleteItemBtn}
                     >
                       <Text style={styles.deleteItemText}>×</Text>
@@ -1759,48 +2193,110 @@ export default function App() {
 
                 <View style={styles.formBox}>
                   <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <Text style={styles.specsTitle}>Datos de Entrega (Simulación)</Text>
+                    <Text style={styles.specsTitle}>Dirección y Estimador de Envío</Text>
                     <Pressable style={styles.autofillBtn} onPress={gestionarAutocompletarDesdePerfil}>
-                      <Text style={styles.autofillBtnText}>📥 Autocompletar</Text>
+                      <Text style={styles.autofillBtnText}>📥  Autocompletar</Text>
                     </Pressable>
                   </View>
+
                   <TextInput
                     style={styles.formInput}
-                    placeholder="Nombre completo"
+                    placeholder="Nombre completo *"
                     placeholderTextColor="#A3A0B8"
                     value={nombreComprador}
-                    onChangeText={setNombreComprador}
+                    onChangeText={(valor) => {
+                      setNombreComprador(valor);
+                      if (errorCheckoutEnvio) setErrorCheckoutEnvio('');
+                    }}
                   />
                   <TextInput
                     style={styles.formInput}
-                    placeholder="Teléfono de contacto"
+                    placeholder="Teléfono de contacto *"
                     placeholderTextColor="#A3A0B8"
                     keyboardType="phone-pad"
                     value={telefonoComprador}
-                    onChangeText={setTelefonoComprador}
+                    onChangeText={(valor) => {
+                      setTelefonoComprador(valor);
+                      if (errorCheckoutEnvio) setErrorCheckoutEnvio('');
+                    }}
                   />
                   <TextInput
                     style={styles.formInput}
-                    placeholder="Municipio (ej. Mosquera, Funza, Madrid)"
-                    placeholderTextColor="#A3A0B8"
-                    value={ciudadComprador}
-                    onChangeText={setCiudadComprador}
-                  />
-                  <TextInput
-                    style={styles.formInput}
-                    placeholder="Dirección exacta"
+                    placeholder="Dirección exacta *"
                     placeholderTextColor="#A3A0B8"
                     value={direccionComprador}
-                    onChangeText={setDireccionComprador}
+                    onChangeText={(valor) => {
+                      setDireccionComprador(valor);
+                      if (errorCheckoutEnvio) setErrorCheckoutEnvio('');
+                    }}
                   />
+
+                  <Text style={styles.specsLabel}>Municipio de entrega *</Text>
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                    {Object.values(TARIFAS_ENVIO_MUNICIPIO).map(itemTarifa => {
+                      const seleccionado = ciudadComprador.trim().toLowerCase() === itemTarifa.municipio.toLowerCase();
+                      return (
+                        <Pressable
+                          key={itemTarifa.municipio}
+                          style={[styles.categoryChip, seleccionado && styles.categoryChipActive]}
+                          onPress={() => {
+                            setCiudadComprador(itemTarifa.municipio);
+                            if (errorCheckoutEnvio) setErrorCheckoutEnvio('');
+                          }}
+                        >
+                          <Text style={[styles.categoryChipText, seleccionado && styles.categoryChipTextActive]}>
+                            {itemTarifa.municipio}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                  <TextInput
+                    style={styles.formInput}
+                    placeholder="O escribe el municipio (ej. Mosquera, Funza, Madrid)"
+                    placeholderTextColor="#A3A0B8"
+                    value={ciudadComprador}
+                    onChangeText={(valor) => {
+                      setCiudadComprador(valor);
+                      if (errorCheckoutEnvio) setErrorCheckoutEnvio('');
+                    }}
+                  />
+
+                  <Text style={styles.specsLabel}>Modalidad de envío *</Text>
+                  <View style={styles.sortBtnsRow}>
+                    {MODALIDADES_ENVIO.map(modalidad => {
+                      const activa = modalidadEnvioSeleccionada === modalidad;
+                      return (
+                        <Pressable
+                          key={modalidad}
+                          style={[styles.sortBtn, activa && styles.sortBtnActive]}
+                          onPress={() => {
+                            setModalidadEnvioSeleccionada(modalidad);
+                            if (errorCheckoutEnvio) setErrorCheckoutEnvio('');
+                          }}
+                        >
+                          <Text style={[styles.sortBtnText, activa && styles.sortBtnTextActive]}>
+                            {modalidad}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+
+                  {errorCheckoutEnvio !== '' && (
+                    <View style={[styles.outOfStockBox, { marginBottom: 0, padding: 10 }]}>
+                      <Text style={[styles.outOfStockText, { fontSize: 12 }]}>{errorCheckoutEnvio}</Text>
+                    </View>
+                  )}
                 </View>
 
                 {(() => {
                   const subtotal = carrito.reduce((acumulado, articulo) => acumulado + (articulo.precio * articulo.cantidad), 0);
                   const descuento = descuentoActivo ? subtotal * 0.10 : 0;
                   const subtotalConDescuento = subtotal - descuento;
-                  const envio = subtotalConDescuento >= 150000 ? 0 : 8000;
-                  const total = subtotalConDescuento + envio;
+                  const estimacionEnvio = calcularEstimacionEnvio(ciudadComprador, modalidadEnvioSeleccionada);
+                  const envioCalculado = estimacionEnvio.valido && estimacionEnvio.soportado ? estimacionEnvio.costo : 0;
+                  const total = subtotalConDescuento + envioCalculado;
 
                   return (
                     <View style={styles.summaryBox}>
@@ -1815,8 +2311,22 @@ export default function App() {
                         </View>
                       )}
                       <View style={styles.summaryRow}>
-                        <Text style={styles.summaryLabel}>Envío Quantum Secure</Text>
-                        <Text style={styles.summaryValue}>{envio === 0 ? 'Gratis' : '$8.000'}</Text>
+                        <Text style={styles.summaryLabel}>
+                          Envío {estimacionEnvio.valido && estimacionEnvio.soportado ? `(${estimacionEnvio.municipioNormalizado} - ${estimacionEnvio.modalidad})` : ''}
+                        </Text>
+                        <Text style={styles.summaryValue}>
+                          {estimacionEnvio.valido && estimacionEnvio.soportado
+                            ? `$${estimacionEnvio.costo.toLocaleString()}`
+                            : 'Por confirmar'}
+                        </Text>
+                      </View>
+                      <View style={styles.summaryRow}>
+                        <Text style={styles.summaryLabel}>Plazo estimado</Text>
+                        <Text style={styles.summaryValue}>
+                          {estimacionEnvio.valido && estimacionEnvio.soportado
+                            ? estimacionEnvio.plazo
+                            : estimacionEnvio.motivo}
+                        </Text>
                       </View>
                       <View style={[styles.summaryRow, styles.summaryTotalRow]}>
                         <Text style={styles.summaryTotalLabel}>Total Estimado</Text>
@@ -1824,7 +2334,7 @@ export default function App() {
                       </View>
 
                       <Pressable style={styles.primaryBtn} onPress={confirmarCompra}>
-                        <Text style={styles.primaryBtnText}>Confirmar Compra Simulada</Text>
+                        <Text style={styles.primaryBtnText}>Confirmar Compra</Text>
                       </Pressable>
                     </View>
                   );
@@ -1855,7 +2365,12 @@ export default function App() {
 
         {pantallaActual === 'history' && (
           <ScrollView contentContainerStyle={styles.scrollContent}>
-            <Text style={styles.sectionTitle}>Historial de Pedidos</Text>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={styles.sectionTitle}>Historial de Pedidos</Text>
+              <Pressable style={styles.adminMiniBtn} onPress={() => abrirCentroAyuda()}>
+                <Text style={styles.adminMiniBtnText}>🎧 Ayuda ({solicitudesAyuda.length})</Text>
+              </Pressable>
+            </View>
 
             <View style={styles.statusSummaryBanner}>
               <Text style={styles.specsTitle}>📊 Resumen de Estados ({historial.length} pedidos)</Text>
@@ -1863,7 +2378,7 @@ export default function App() {
                 Total acumulado pedidos activos: ${totalPedidosActivos.toLocaleString()}
               </Text>
               <Text style={{ color: '#A3A0B8', fontSize: 11 }}>
-                Confirmado: {conteoEstadosHistorial['Confirmado'] || 0} • En preparación: {conteoEstadosHistorial['En preparación'] || 0} • Enviado: {conteoEstadosHistorial['Enviado'] || 0} • Entregado: {conteoEstadosHistorial['Entregado'] || 0} • Cancelado: {conteoEstadosHistorial['Cancelado'] || 0}
+                Confirmado: {conteoEstadosHistorial['Confirmado'] || 0} • Preparando: {conteoEstadosHistorial['Preparando'] || 0} • En camino: {conteoEstadosHistorial['En camino'] || 0} • Entregado: {conteoEstadosHistorial['Entregado'] || 0} • Cancelado: {conteoEstadosHistorial['Cancelado'] || 0}
               </Text>
             </View>
 
@@ -1891,11 +2406,14 @@ export default function App() {
                     {pedido.comprador && (
                       <Text style={styles.historyBuyer}>Comprador: {pedido.comprador.nombre} ({pedido.comprador.ciudad})</Text>
                     )}
+                    {pedido.direccion && !pedido.comprador && (
+                      <Text style={styles.historyBuyer}>Destino: {pedido.direccion.municipio}</Text>
+                    )}
                     <View style={styles.historyItemsList}>
-                      {pedido.articulos.map((articulo, i) => {
+                      {pedido.articulos.map((articulo, indiceArticulo) => {
                         const precioUnitario = articulo.precio || articulo.precioUnitario || 0;
                         return (
-                          <Text key={i} style={styles.historyItemText}>
+                          <Text key={indiceArticulo} style={styles.historyItemText}>
                             • {articulo.nombre} {articulo.etiquetaVariante ? `[${articulo.etiquetaVariante}]` : ''} (x{articulo.cantidad}) - ${(precioUnitario * articulo.cantidad).toLocaleString()}
                           </Text>
                         );
@@ -1911,15 +2429,185 @@ export default function App() {
                         style={[styles.editProductBtn, { flex: 1, marginTop: 0, paddingVertical: 8 }]}
                         onPress={() => abrirDetallePedido(pedido.codigo)}
                       >
-                        <Text style={styles.editProductBtnText}>📍 Seguimiento / Gestionar</Text>
+                        <Text style={styles.editProductBtnText}>📍 Seguimiento</Text>
                       </Pressable>
                       <Pressable
                         style={[styles.couponBtn, { flex: 1, paddingVertical: 8 }]}
                         onPress={() => gestionarRecompra(pedido)}
                       >
-                        <Text style={styles.couponBtnText}>🔄 Volver a comprar</Text>
+                        <Text style={styles.couponBtnText}>🔄 Recomprar</Text>
                       </Pressable>
                     </View>
+
+                    <Pressable
+                      style={styles.helpOrderBtn}
+                      onPress={() => abrirCentroAyuda(pedido.codigo)}
+                    >
+                      <Text style={styles.helpOrderBtnText}>🎧 Solicitar ayuda con este pedido</Text>
+                    </Pressable>
+                  </View>
+                );
+              })
+            )}
+          </ScrollView>
+        )}
+
+        {pantallaActual === 'help' && (
+          <ScrollView contentContainerStyle={styles.scrollContent}>
+            <Pressable style={styles.backBtn} onPress={() => navegarA('history')}>
+              <Text style={styles.backBtnText}>← Volver al Historial</Text>
+            </Pressable>
+
+            <Text style={styles.sectionTitle}>🎧 Centro de Ayuda y Solicitudes</Text>
+            <Text style={{ color: '#A3A0B8', fontSize: 12, marginBottom: 14 }}>
+              Registra una solicitud asociada a un pedido existente con motivo Entrega, Producto u Otro.
+            </Text>
+
+            <View style={styles.formBox}>
+              <Text style={styles.specsTitle}>Nueva Solicitud de Ayuda</Text>
+
+              <Text style={styles.specsLabel}>1. Selecciona el pedido asociado *</Text>
+              {historial.length === 0 ? (
+                <View style={styles.outOfStockBox}>
+                  <Text style={styles.outOfStockText}>
+                    No tienes pedidos en el historial para asociar una solicitud.
+                  </Text>
+                </View>
+              ) : (
+                <View style={{ gap: 8, marginBottom: 6 }}>
+                  {historial.map(pedido => {
+                    const estaSeleccionado = codigoPedidoAyuda === pedido.codigo;
+                    return (
+                      <Pressable
+                        key={pedido.codigo}
+                        style={[
+                          styles.variantOptionBtn,
+                          estaSeleccionado && styles.variantOptionBtnActive
+                        ]}
+                        onPress={() => {
+                          setCodigoPedidoAyuda(pedido.codigo);
+                          if (errorAyuda) setErrorAyuda('');
+                        }}
+                      >
+                        <View style={{ flex: 1 }}>
+                          <Text style={[styles.variantOptionTitle, estaSeleccionado && { color: '#ffffff' }]}>
+                            {pedido.codigo} • {pedido.estado || 'Confirmado'}
+                          </Text>
+                          <Text style={styles.variantOptionMeta}>
+                            {pedido.fecha} • Total: ${pedido.total.toLocaleString()}
+                          </Text>
+                        </View>
+                        <Text style={{ color: estaSeleccionado ? '#ffffff' : '#9366F1', fontWeight: 'bold' }}>
+                          {estaSeleccionado ? '✓' : 'Elegir'}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              )}
+
+              <Text style={styles.specsLabel}>2. Motivo de la solicitud *</Text>
+              <View style={styles.sortBtnsRow}>
+                {MOTIVOS_AYUDA.map(motivo => {
+                  const activo = motivoAyuda === motivo;
+                  return (
+                    <Pressable
+                      key={motivo}
+                      style={[styles.sortBtn, activo && styles.sortBtnActive]}
+                      onPress={() => setMotivoAyuda(motivo)}
+                    >
+                      <Text style={[styles.sortBtnText, activo && styles.sortBtnTextActive]}>
+                        {motivo}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              <Text style={[styles.specsLabel, { marginTop: 6 }]}>
+                3. Descripción (mínimo 15 caracteres) *
+              </Text>
+              <TextInput
+                style={[styles.formInput, { height: 90, textAlignVertical: 'top' }]}
+                placeholder="Describe el inconveniente con detalle (mínimo 15 caracteres)..."
+                placeholderTextColor="#A3A0B8"
+                multiline
+                value={descripcionAyuda}
+                onChangeText={(texto) => {
+                  setDescripcionAyuda(texto);
+                  if (errorAyuda) setErrorAyuda('');
+                }}
+              />
+              <Text style={{ color: descripcionAyuda.trim().length >= 15 ? '#4ade80' : '#A3A0B8', fontSize: 11 }}>
+                Caracteres ingresados: {descripcionAyuda.trim().length} / 15 mínimos
+              </Text>
+
+              {errorAyuda !== '' && (
+                <View style={[styles.outOfStockBox, { marginBottom: 4, padding: 10 }]}>
+                  <Text style={[styles.outOfStockText, { fontSize: 12 }]}>{errorAyuda}</Text>
+                </View>
+              )}
+
+              <Pressable style={[styles.primaryBtn, { marginTop: 6 }]} onPress={gestionarCrearSolicitudAyuda}>
+                <Text style={styles.primaryBtnText}>Enviar</Text>
+              </Pressable>
+            </View>
+
+            <Text style={[styles.sectionTitle, { marginTop: 8 }]}>
+              Mis Casos Registrados ({solicitudesAyuda.length})
+            </Text>
+
+            {solicitudesAyuda.length === 0 ? (
+              <View style={styles.emptyContainer}>
+                <Text style={styles.emptyText}>
+                  Aún no has registrado solicitudes de ayuda en esta sesión.
+                </Text>
+              </View>
+            ) : (
+              solicitudesAyuda.map(caso => {
+                const esRespondido = caso.estado === 'Respondido';
+                const colorCaso = esRespondido ? '#4ade80' : '#facc15';
+                return (
+                  <View key={caso.numeroCaso} style={styles.historyCard}>
+                    <View style={styles.historyHeaderRow}>
+                      <Text style={styles.historyCode}>{caso.numeroCaso}</Text>
+                      <View style={[styles.statusBadge, { borderColor: colorCaso }]}>
+                        <Text style={[styles.statusBadgeText, { color: colorCaso }]}>
+                          {caso.estado}
+                        </Text>
+                      </View>
+                    </View>
+
+                    <Text style={styles.historyBuyer}>
+                      Pedido: {caso.codigoPedido} • Motivo: {caso.motivo}
+                    </Text>
+                    <Text style={[styles.historyDate, { marginBottom: 8 }]}>
+                      Registrado: {caso.fechaCreacion}
+                    </Text>
+
+                    <View style={styles.historyItemsList}>
+                      <Text style={{ color: '#ffffff', fontSize: 13, lineHeight: 19 }}>
+                        {caso.descripcion}
+                      </Text>
+                    </View>
+
+                    {esRespondido ? (
+                      <View style={styles.helpResponseBox}>
+                        <Text style={{ color: '#4ade80', fontSize: 11, fontWeight: 'bold', marginBottom: 4 }}>
+                          ✓ Respuesta ({caso.fechaRespuesta})
+                        </Text>
+                        <Text style={{ color: '#e2e8f0', fontSize: 12, lineHeight: 18 }}>
+                          {caso.respuestaSoporte}
+                        </Text>
+                      </View>
+                    ) : (
+                      <Pressable
+                        style={[styles.simActionBtn, { marginTop: 6 }]}
+                        onPress={() => gestionarSimularRespuestaCaso(caso.numeroCaso)}
+                      >
+                        <Text style={styles.simActionBtnText}>Simular respuesta</Text>
+                      </Pressable>
+                    )}
                   </View>
                 );
               })
@@ -1928,7 +2616,7 @@ export default function App() {
         )}
 
         {pantallaActual === 'orderDetail' && (() => {
-          const pedido = historial.find(item => item.codigo === codigoPedidoSeleccionado);
+          const pedido = historial.find(elemento => elemento.codigo === codigoPedidoSeleccionado);
           if (!pedido) {
             return (
               <View style={styles.emptyContainer}>
@@ -1946,7 +2634,7 @@ export default function App() {
             ? pedido.historialEstados
             : [{ estado: estadoActual, fecha: pedido.fecha }];
           const puedeAvanzar = estadoActual !== 'Entregado' && estadoActual !== 'Cancelado';
-          const puedeCancelar = estadoActual === 'Confirmado' || estadoActual === 'En preparación';
+          const puedeCancelar = estadoActual === 'Confirmado' || estadoActual === 'Preparando';
 
           return (
             <ScrollView contentContainerStyle={styles.scrollContent}>
@@ -1962,7 +2650,7 @@ export default function App() {
               </View>
 
               <View style={styles.specsBox}>
-                <Text style={styles.specsTitle}>📍 Línea de Tiempo del Pedido</Text>
+                <Text style={styles.specsTitle}>📍 Historial Cronológico de Estados</Text>
                 {lineaTiempo.map((paso, indice) => (
                   <View key={indice} style={styles.timelineRow}>
                     <View style={[styles.timelineDot, { backgroundColor: obtenerColorEstadoPedido(paso.estado) }]} />
@@ -1974,7 +2662,7 @@ export default function App() {
                 ))}
 
                 {estadoActual !== 'Cancelado' &&
-                  PASOS_FLUJO_PEDIDO.filter(paso => !lineaTiempo.some(item => item.estado === paso)).map((pasoPendiente, indice) => (
+                  PASOS_FLUJO_PEDIDO.filter(paso => !lineaTiempo.some(elemento => elemento.estado === paso)).map((pasoPendiente, indice) => (
                     <View key={`pend-${indice}`} style={[styles.timelineRow, { opacity: 0.45 }]}>
                       <View style={[styles.timelineDot, { backgroundColor: '#64748b' }]} />
                       <View style={{ flex: 1 }}>
@@ -1989,44 +2677,44 @@ export default function App() {
                     style={[styles.primaryBtn, { marginTop: 12, paddingVertical: 11 }]}
                     onPress={() => gestionarAvanzarEstadoPedido(pedido.codigo)}
                   >
-                    <Text style={styles.primaryBtnText}>⏩ Avanzar estado (Simulación)</Text>
+                    <Text style={styles.primaryBtnText}>Simular avance de entrega</Text>
                   </Pressable>
                 ) : (
                   <Text style={{ color: '#A3A0B8', fontSize: 12, marginTop: 10 }}>
-                    Este pedido ha llegado a un estado final ({estadoActual}) y no puede avanzar más.
+                    Este pedido está en estado final ({estadoActual}) y no permite nuevas transiciones.
                   </Text>
                 )}
               </View>
 
               <View style={styles.specsBox}>
-                <Text style={styles.specsTitle}>🛡️ Gestión y Cancelación (HU26)</Text>
+                <Text style={styles.specsTitle}>🛡️ Cancelación de Pedido</Text>
                 {puedeCancelar ? (
                   <>
                     <Text style={{ color: '#A3A0B8', fontSize: 12, marginBottom: 10 }}>
-                      Puedes cancelar este pedido mientras esté en "Confirmado" o "En preparación". Las unidades se reintegrarán automáticamente al catálogo.
+                      Puedes cancelar este pedido mientras esté Confirmado o Preparando. El pedido se conserva en el historial como Cancelado y se reintegra el stock de cada variante.
                     </Text>
                     <Pressable
                       style={styles.cancelOrderBtn}
                       onPress={() => gestionarCancelarPedido(pedido.codigo)}
                     >
-                      <Text style={styles.cancelOrderBtnText}>❌ Cancelar pedido y reintegrar stock</Text>
+                      <Text style={styles.cancelOrderBtnText}>Cancelar pedido</Text>
                     </Pressable>
                   </>
                 ) : (
-                  <Text style={{ color: '#A3A0B8', fontSize: 12 }}>
+                  <Text style={{ color: '#ff8080', fontSize: 12 }}>
                     {estadoActual === 'Cancelado'
-                      ? 'Este pedido ya fue cancelado y su inventario fue reintegrado.'
-                      : `No es posible cancelar un pedido que ya se encuentra en estado "${estadoActual}".`}
+                      ? 'Este pedido ya fue cancelado y su inventario ya fue reintegrado.'
+                      : `No es posible cancelar el pedido porque ya se encuentra en estado "${estadoActual}".`}
                   </Text>
                 )}
               </View>
 
               <View style={styles.specsBox}>
                 <Text style={styles.specsTitle}>📦 Artículos del Pedido</Text>
-                {pedido.articulos.map((articulo, i) => {
+                {pedido.articulos.map((articulo, indiceArticulo) => {
                   const precioUnitario = articulo.precio || articulo.precioUnitario || 0;
                   return (
-                    <Text key={i} style={[styles.historyItemText, { marginBottom: 4 }]}>
+                    <Text key={indiceArticulo} style={[styles.historyItemText, { marginBottom: 4 }]}>
                       • {articulo.nombre} {articulo.etiquetaVariante ? `[${articulo.etiquetaVariante}]` : ''} (x{articulo.cantidad}) — ${(precioUnitario * articulo.cantidad).toLocaleString()}
                     </Text>
                   );
@@ -2041,6 +2729,13 @@ export default function App() {
                   onPress={() => gestionarRecompra(pedido)}
                 >
                   <Text style={styles.couponBtnText}>🔄 Volver a comprar estos artículos</Text>
+                </Pressable>
+
+                <Pressable
+                  style={[styles.helpOrderBtn, { marginTop: 10 }]}
+                  onPress={() => abrirCentroAyuda(pedido.codigo)}
+                >
+                  <Text style={styles.helpOrderBtnText}>🎧 Solicitar ayuda con este pedido</Text>
                 </Pressable>
               </View>
             </ScrollView>
@@ -2088,7 +2783,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 20,
+    paddingHorizontal: 14,
     borderBottomWidth: 1,
     borderBottomColor: 'rgba(147, 102, 241, 0.35)',
     marginTop: 10,
@@ -2096,26 +2791,27 @@ const styles = StyleSheet.create({
   logoContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 6,
+    flexShrink: 1,
   },
   logoImg: {
-    width: 90,
-    height: 28,
+    width: 78,
+    height: 26,
     resizeMode: 'contain',
   },
   headerOwnerText: {
     color: '#A3A0B8',
     fontSize: 11,
-    fontWeight: '500',
+    fontWeight: '600',
   },
   headerIcons: {
     flexDirection: 'row',
-    gap: 6,
+    gap: 5,
   },
   cartIconBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     backgroundColor: 'rgba(147, 102, 241, 0.15)',
     borderWidth: 1,
     borderColor: 'rgba(147, 102, 241, 0.35)',
@@ -2131,9 +2827,9 @@ const styles = StyleSheet.create({
     top: -4,
     right: -4,
     backgroundColor: '#9366F1',
-    width: 17,
-    height: 17,
-    borderRadius: 8.5,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -2330,6 +3026,64 @@ const styles = StyleSheet.create({
     color: '#9366F1',
     fontSize: 11,
     fontWeight: 'bold',
+  },
+  helpOrderBtn: {
+    marginTop: 8,
+    backgroundColor: 'rgba(250, 204, 21, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(250, 204, 21, 0.5)',
+    borderRadius: 8,
+    paddingVertical: 8,
+    alignItems: 'center',
+  },
+  helpOrderBtnText: {
+    color: '#facc15',
+    fontSize: 11,
+    fontWeight: 'bold',
+  },
+  helpResponseBox: {
+    marginTop: 6,
+    backgroundColor: 'rgba(74, 222, 128, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(74, 222, 128, 0.4)',
+    borderRadius: 10,
+    padding: 10,
+  },
+  restockBox: {
+    backgroundColor: 'rgba(250, 204, 21, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(250, 204, 21, 0.45)',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 14,
+  },
+  cancelSubBtn: {
+    backgroundColor: 'rgba(255, 92, 92, 0.15)',
+    borderWidth: 1,
+    borderColor: '#ff5c5c',
+    borderRadius: 10,
+    paddingVertical: 8,
+    alignItems: 'center',
+  },
+  cancelSubBtnText: {
+    color: '#ff8080',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  notificationCard: {
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 12,
+  },
+  notificationUnread: {
+    backgroundColor: 'rgba(56, 189, 248, 0.1)',
+    borderColor: '#38bdf8',
+  },
+  notificationRead: {
+    backgroundColor: 'rgba(23, 21, 37, 0.75)',
+    borderColor: 'rgba(147, 102, 241, 0.25)',
+    opacity: 0.8,
   },
   adminRowCard: {
     flexDirection: 'row',

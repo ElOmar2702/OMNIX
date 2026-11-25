@@ -12,6 +12,69 @@ export const INFO_MARCA = {
   marcas: ['OMNIX Labs', 'Kinetix Core', 'AetherTech'],
 };
 
+export const MODALIDADES_ENVIO = ['Estándar', 'Exprés'];
+
+export const TARIFAS_ENVIO_MUNICIPIO = {
+  mosquera: {
+    municipio: 'Mosquera',
+    Estándar: { costo: 6000, plazo: '1 a 2 días' },
+    Exprés: { costo: 10000, plazo: '1 a 2 días' },
+  },
+  funza: {
+    municipio: 'Funza',
+    Estándar: { costo: 8000, plazo: '1 a 2 días' },
+    Exprés: { costo: 12000, plazo: '1 a 2 días' },
+  },
+  madrid: {
+    municipio: 'Madrid',
+    Estándar: { costo: 10000, plazo: '1 a 2 días' },
+    Exprés: { costo: 14000, plazo: '1 a 2 días' },
+  },
+};
+
+export const normalizarMunicipioEnvio = (municipioTexto) => {
+  if (!municipioTexto || typeof municipioTexto !== 'string') return '';
+  const limpio = municipioTexto
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  return limpio;
+};
+
+export const calcularEstimacionEnvio = (municipioTexto, modalidad) => {
+  const claveMunicipio = normalizarMunicipioEnvio(municipioTexto);
+  const tarifaMunicipio = TARIFAS_ENVIO_MUNICIPIO[claveMunicipio] || null;
+  const modalidadValida = MODALIDADES_ENVIO.includes(modalidad) ? modalidad : null;
+
+  if (!tarifaMunicipio || !modalidadValida) {
+    return {
+      valido: false,
+      soportado: false,
+      municipioNormalizado: tarifaMunicipio ? tarifaMunicipio.municipio : municipioTexto.trim(),
+      modalidad: modalidadValida,
+      costo: 0,
+      plazo: '',
+      motivo: !claveMunicipio
+        ? 'Selecciona o ingresa un municipio de entrega.'
+        : !tarifaMunicipio
+          ? 'Municipio fuera de tarifa automática: requiere ajuste manual o no tiene envío disponible.'
+          : 'Selecciona la modalidad de envío (Estándar o Exprés).',
+    };
+  }
+
+  const detalleModalidad = tarifaMunicipio[modalidadValida];
+  return {
+    valido: true,
+    soportado: true,
+    municipioNormalizado: tarifaMunicipio.municipio,
+    modalidad: modalidadValida,
+    costo: detalleModalidad.costo,
+    plazo: detalleModalidad.plazo,
+    motivo: '',
+  };
+};
+
 export const obtenerStockTotalProducto = (producto) => {
   if (!producto || !Array.isArray(producto.variantes)) return 0;
   return producto.variantes.reduce((acumulado, variante) => acumulado + (Number(variante.stock) || 0), 0);
@@ -237,4 +300,4 @@ export const PEDIDOS_INICIALES = [
       { estado: 'Preparando', fecha: '2026-11-21 16:05' },
     ],
   },
-];
+];  
